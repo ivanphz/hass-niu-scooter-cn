@@ -1,0 +1,127 @@
+name: Check upstream
+
+# 上游有变动时自动抓快照、提交、并开一个带 diff 的 Issue。
+# 因为不需要本地开发环境，日常流程就是：收到 Issue 通知 -> 看 diff -> 决定是否吸收。
+#
+# 需要仓库开启：Settings -> Actions -> General -> Workflow permissions
+#              选 "Read and write permissions"
+
+on:
+  schedule:
+    # 每周一 03:00 UTC（北京时间 11:00）。上游节奏很慢，每周一次足够。
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch upstream snapshots
+        run: |
+          set -euo pipefail
+
+          # 本项目的直接基座（国内服分支）
+          HASSCC_RAW="https://raw.githubusercontent.com/hasscc/home-assistant-niu-component/master/custom_components/niu"
+          HASSCC_FILES="__init__.py api.py config_flow.py const.py coordinator.py sensor.py manifest.json strings.json"
+
+          # 整个 fork 网络的根（国际服分支，仍在维护，值得跟）
+          MW_RAW="https://raw.githubusercontent.com/marcelwestrahome/home-assistant-niu-component/master/custom_components/niu"
+          MW_FILES="__init__.py api.py camera.py config_flow.py const.py sensor.py manifest.json"
+
+          mkdir -p upstream/hasscc upstream/marcelwestra
+
+          fetch() {
+            local base="$1" dir="$2"; shift 2
+            for f in "$@"; do
+              if curl -fsSL --retry 3 --retry-delay 5 -o "$dir/$f" "$base/$f"; then
+                echo "  ok   $dir/$f"
+              else
+                echo "  MISS $dir/$f (上游可能已删除该文件)"
+                rm -f "$dir/$f"
+              fi
+            done
+          }
+
+          echo "== hasscc =="
+          fetch "$HASSCC_RAW" upstream/hasscc $HASSCC_FILES
+          echo "== marcelwestra =="
+          fetch "$MW_RAW" upstream/marcelwestra $MW_FILES
+
+      - name: Detect drift
+        id: drift
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain upstream/)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "上游无变化。"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git add -A upstream/
+          # 截断到 50000 字符，GitHub Issue body 上限 65536
+          git diff --cached -- upstream/ | head -c 50000 > /tmp/upstream.diff
+          {
+            echo "summary<<DIFFEOF"
+            git diff --cached --stat -- upstream/
+            echo "DIFFEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit snapshot
+        if: steps.drift.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: sync upstream snapshot"
+          git push
+
+      - name: Open issue
+        if: steps.drift.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        env:
+          SUMMARY: ${{ steps.drift.outputs.summary }}
+        with:
+          script: |
+            const fs = require('fs');
+            const diff = fs.readFileSync('/tmp/upstream.diff', 'utf8');
+            const today = new Date().toISOString().slice(0, 10);
+            const body = [
+              '上游代码有变动，快照已提交到 `upstream/`。',
+              '',
+              '## 变更概览',
+              '```',
+              process.env.SUMMARY.trim(),
+              '```',
+              '',
+              '## 完整 diff',
+              '<details><summary>展开</summary>',
+              '',
+              '```diff',
+              diff,
+              '```',
+              '',
+              '</details>',
+              '',
+              '## 处理清单',
+              '',
+              '- [ ] 判断变更是否影响国内服（区服无关的修复直接吸收，`-fk` 相关的忽略）',
+              '- [ ] 检查是否改了 API 路径、`app_id`、UA 或鉴权方式 —— 这几项两区共用，必须跟',
+              '- [ ] 检查 `SENSOR_TYPES` 是否新增/改名了传感器',
+              '- [ ] 决定吸收的部分，改到 `custom_components/niu/` 下并 bump `manifest.json` 版本',
+              '',
+              '> 上游 diff 只是参考，本仓库已重构过架构，不要直接覆盖文件。',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `上游有更新 (${today})`,
+              body,
+              labels: ['upstream'],
+            });
