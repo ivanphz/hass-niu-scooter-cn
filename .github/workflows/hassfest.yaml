@@ -10,7 +10,8 @@ jobs:
   validate:
     runs-on: "ubuntu-latest"
     steps:
-      - uses: "actions/checkout@v2"
+      # v2 跑在已弃用的 Node 20 上，会被强制降级并告警
+      - uses: actions/checkout@v4
       - uses: home-assistant/actions/hassfest@master
       - uses: hacs/action@main
         with:

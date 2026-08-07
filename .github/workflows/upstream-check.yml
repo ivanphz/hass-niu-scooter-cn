@@ -51,16 +51,30 @@ jobs:
           MW_RAW="https://raw.githubusercontent.com/marcelwestrahome/home-assistant-niu-component/master/custom_components/niu"
           MW_FILES="__init__.py api.py camera.py config_flow.py const.py sensor.py manifest.json"
 
+          # 每次全量重建，顺带清掉上游已删除的文件和旧版命名残留
+          rm -rf upstream/hasscc upstream/marcelwestra
           mkdir -p upstream/hasscc upstream/marcelwestra
+
+          # hassfest 把「含 __init__.py 或 manifest.json 的目录」一律当作集成
+          # (script/hassfest/model.py: Integration.load_dir)，快照目录会被误判成
+          # 域名为 niu 但目录名不符的集成而报错。给这两个文件加 .txt 后缀避开发现逻辑，
+          # 其余 .py 保持原扩展名，diff 里仍有语法高亮。
+          snapshot_name() {
+            case "$1" in
+              manifest.json|__init__.py) echo "$1.txt" ;;
+              *)                         echo "$1" ;;
+            esac
+          }
 
           fetch() {
             local base="$1" dir="$2"; shift 2
             for f in "$@"; do
-              if curl -fsSL --retry 3 --retry-delay 5 -o "$dir/$f" "$base/$f"; then
-                echo "  ok   $dir/$f"
+              local out; out="$(snapshot_name "$f")"
+              if curl -fsSL --retry 3 --retry-delay 5 -o "$dir/$out" "$base/$f"; then
+                echo "  ok   $dir/$out"
               else
-                echo "  MISS $dir/$f (上游可能已删除该文件)"
-                rm -f "$dir/$f"
+                echo "  MISS $dir/$out (上游可能已删除该文件)"
+                rm -f "$dir/$out"
               fi
             done
           }
