@@ -198,7 +198,8 @@ class NiuConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> NiuOptionsFlowHandler:
         """Get the options flow for this handler."""
-        return NiuOptionsFlowHandler(config_entry)
+        # 不传 config_entry：HA 2024.11 起框架会自己注入
+        return NiuOptionsFlowHandler()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -391,11 +392,11 @@ class NiuOptionsFlowHandler(OptionsFlow):
 
     传感器勾选、轮询间隔、代理地址都能在这里改，改完自动重载。
     区服因为会影响坐标系和实体语义，只在「重新配置」里改。
-    """
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
+    注意这里没有 __init__：HA 2024.11 起 OptionsFlow.config_entry 由框架
+    以只读属性形式注入，基座那种 `self.config_entry = config_entry` 的写法
+    先是告警，在更新的 HA 上会直接抛 AttributeError。
+    """
 
     async def async_step_init(self, user_input=None):
         """Handle options flow."""

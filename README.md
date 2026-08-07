@@ -287,6 +287,17 @@ docker exec -it homeassistant sh -c \
 
 ---
 
+## 仓库设置要求（HACS）
+
+HACS 除了检查文件，还会检查 GitHub 仓库本身。以下两项在仓库设置里配，不是文件：
+
+- **描述**：仓库首页右侧 About 的齿轮里填，HACS 界面会直接显示它
+- **Topics**：同一处添加，用于 HACS 商店内的搜索
+
+`hacs.json` 只允许这些键：`name`、`content_in_root`、`zip_release`、`filename`、`hide_default_branch`、`country`、`homeassistant`、`hacs`、`persistent_directory`。`authors` / `repository` / `issues` 由 HACS 从 GitHub 直接读取，写进去会导致校验失败。
+
+> 这些检查针对的是「提交进 HACS 默认商店」。作为自用的 custom repository，不通过也照样能装。
+
 ## 维护：跟踪上游
 
 `.github/workflows/upstream-check.yml` 每周一自动检查两个上游仓库，有变动就把快照提交到 `upstream/`，并开一个带完整 diff 的 Issue。
