@@ -1,6 +1,6 @@
 {
+  "title": "NIU 滑板车集成",
   "config": {
-    "title": "NIU 滑板车集成",
     "abort": {
       "already_configured": "设备已配置",
       "reconfigure_successful": "重新配置成功"

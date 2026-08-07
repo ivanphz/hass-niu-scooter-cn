@@ -1,6 +1,6 @@
 {
+  "title": "NIU Scooter Integration",
   "config": {
-    "title": "NIU Scooter Integration",
     "abort": {
       "already_configured": "Device is already configured",
       "reconfigure_successful": "Reconfiguration successful"
