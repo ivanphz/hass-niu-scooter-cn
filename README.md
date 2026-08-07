@@ -304,6 +304,10 @@ HACS 除了检查文件，还会检查 GitHub 仓库本身。以下两项在仓�
 
 **需要在 Settings → Actions → General → Workflow permissions 里选 "Read and write permissions"**，否则无法提交和开 Issue。也可以在 Actions 页手动触发。
 
+快照里 `manifest.json` 和 `__init__.py` 带 `.txt` 后缀，这是有意为之：hassfest 会把任何含这两个文件的目录当作集成校验，快照目录会因「域名与目录名不符」而让 CI 报错。其余 `.py` 保持原扩展名，diff 里仍有语法高亮。
+
+每次运行会先 `rm -rf` 再重建快照目录，所以上游删掉的文件会自动从快照中消失，手工改动也会被覆盖。
+
 收到 Issue 后的判断顺序：
 
 1. 改的是 API 路径、`app_id`、UA 或鉴权方式吗？→ **两区共用，必须跟**
