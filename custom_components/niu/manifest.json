@@ -1,0 +1,18 @@
+{
+  "domain": "niu",
+  "name": "NIU Scooters",
+  "version": "2.1.0",
+  "iot_class": "cloud_polling",
+  "documentation": "https://github.com/ivanphz/hass-niu-scooter-cn",
+  "issue_tracker": "https://github.com/ivanphz/hass-niu-scooter-cn/issues",
+  "requirements": [
+    "requests",
+    "PySocks>=1.7.1"
+  ],
+  "dependencies": [],
+  "codeowners": [
+    "@ivanphz"
+  ],
+  "config_flow": true,
+  "single_config_entry": false
+}

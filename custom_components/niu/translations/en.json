@@ -1,0 +1,89 @@
+{
+  "config": {
+    "title": "NIU Scooter Integration",
+    "abort": {
+      "already_configured": "Device is already configured",
+      "reconfigure_successful": "Reconfiguration successful"
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to NIU API. Check the region, network egress or proxy settings",
+      "invalid_auth": "Invalid authentication credentials",
+      "unknown": "Unexpected error occurred",
+      "no_sensors_selected": "Select at least one sensor",
+      "invalid_sensors": "Invalid sensor selection",
+      "invalid_proxy": "Malformed proxy address. Example: 1.2.3.4:18443 or http://user:pass@1.2.3.4:18443. Leave empty for a direct connection"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "username": "Username/Email",
+          "password": "Password",
+          "scooter_id": "Scooter ID",
+          "region": "Server region",
+          "proxy": "Proxy URL (optional)",
+          "proxy_username": "Proxy username (optional)",
+          "proxy_password": "Proxy password (optional)"
+        },
+        "data_description": {
+          "region": "Accounts are region-bound. Choose the one matching the app you use",
+          "proxy": "e.g. http://1.2.3.4:8080 or socks5h://1.2.3.4:1080. Leave empty for direct connection. Applies to this integration only",
+          "proxy_password": "Leave empty if the proxy needs no authentication. The password is URL-encoded automatically, so special characters are fine"
+        },
+        "description": "Enter your NIU account credentials, pick the server region and the scooter to monitor.",
+        "title": "NIU Account"
+      },
+      "sensors": {
+        "data": {
+          "monitored_variables": "Sensors to monitor",
+          "scan_interval": "Polling interval (seconds)"
+        },
+        "data_description": {
+          "scan_interval": "Defaults to 300s. Values below 120s risk tripping server-side rate limiting"
+        },
+        "description": "Select which sensors you want to monitor for your NIU scooter.",
+        "title": "Select Sensors"
+      },
+      "reconfigure": {
+        "data": {
+          "username": "Username/Email",
+          "password": "Password",
+          "region": "Server region",
+          "proxy": "Proxy URL (optional)",
+          "proxy_username": "Proxy username (optional)",
+          "proxy_password": "Proxy password (optional)"
+        },
+        "description": "Reconfigure your NIU credentials, server region and proxy.",
+        "title": "Reconfigure NIU Account",
+        "data_description": {
+          "proxy_password": "Leave empty if the proxy needs no authentication. The password is URL-encoded automatically, so special characters are fine"
+        }
+      },
+      "reconfigure_sensors": {
+        "data": {
+          "monitored_variables": "Sensors to monitor",
+          "scan_interval": "Polling interval (seconds)"
+        },
+        "description": "Select which sensors you want to monitor for your NIU scooter.",
+        "title": "Reselect Sensors"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "monitored_variables": "Sensors to monitor",
+          "scan_interval": "Polling interval (seconds)",
+          "proxy": "Proxy URL (optional)",
+          "proxy_username": "Proxy username (optional)",
+          "proxy_password": "Proxy password (optional)"
+        },
+        "description": "Adjust sensors, polling interval and proxy. Use Reconfigure to switch server region.",
+        "title": "NIU Integration Options",
+        "data_description": {
+          "proxy_password": "Leave empty if the proxy needs no authentication. The password is URL-encoded automatically, so special characters are fine"
+        }
+      }
+    }
+  }
+}

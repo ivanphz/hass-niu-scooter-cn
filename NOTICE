@@ -1,0 +1,20 @@
+hass-niu-scooter-cn
+Copyright 2026 ivanphz
+
+本项目基于以下 Apache License 2.0 授权的作品二次开发：
+
+1. home-assistant-niu-component
+   https://github.com/marcelwestrahome/home-assistant-niu-component
+   Copyright Marcel Westra, Giovanni P. (@pikka97)
+   —— fork 网络的根，国际服 (-fk) 实现。
+
+2. home-assistant-niu-component
+   https://github.com/hasscc/home-assistant-niu-component
+   Copyright goxofy (@goxofy)
+   —— 由上述项目 fork，重构为 DataUpdateCoordinator 架构，
+      加入国内服端点、GCJ-02 坐标转换与中文翻译。本项目的直接基座。
+
+本项目在此基础上增加区服切换、代理支持与轮询治理，
+并修复若干配置读取、错误处理与资源释放问题。详见 README.md。
+
+upstream/ 目录下保存的上游代码快照仅用于变更比对，版权归各自作者所有。

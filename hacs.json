@@ -1,0 +1,11 @@
+{
+  "name": "NIU Scooter Integration (CN)",
+  "content_in_root": false,
+  "render_readme": true,
+  "authors": [
+    "ivanphz"
+  ],
+  "repository": "https://github.com/ivanphz/hass-niu-scooter-cn",
+  "issues": "https://github.com/ivanphz/hass-niu-scooter-cn/issues",
+  "homeassistant": "2024.6.0"
+}
