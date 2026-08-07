@@ -116,6 +116,25 @@ jobs:
             echo "truncated=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # 纯重命名、权限变更等情况下 git 报告 0 增 0 删，没有任何实际内容变动，
+          # 提交快照即可，不必开 Issue 打扰。
+          # 用 --numstat 而不是解析 --shortstat：前者是稳定的「增<TAB>删<TAB>路径」
+          # 三列格式（二进制文件为 -），后者是给人读的英文句子，措辞随 git 版本变化
+          # （"1 deletion" / "2 deletions"），拿来做判据不可靠。
+          changed_lines=$(
+            git diff --cached --numstat -- upstream/ \
+              | awk '{ if ($1 ~ /^[0-9]+$/) a += $1; if ($2 ~ /^[0-9]+$/) d += $2 } END { print a + d + 0 }'
+          )
+          git diff --cached --shortstat -- upstream/
+
+          if [ "$changed_lines" -eq 0 ]; then
+            echo "content_changed=false" >> "$GITHUB_OUTPUT"
+            echo "仅有重命名或结构调整，无内容变动，跳过开 Issue。"
+          else
+            echo "content_changed=true" >> "$GITHUB_OUTPUT"
+            echo "内容变动共 ${changed_lines} 行。"
+          fi
+
       - name: Commit snapshot
         if: steps.drift.outputs.changed == 'true'
         run: |
@@ -125,6 +144,8 @@ jobs:
 
           if [ "${{ steps.baseline.outputs.first_run }}" = "true" ]; then
             git commit -m "chore: 建立上游快照基线"
+          elif [ "${{ steps.drift.outputs.content_changed }}" = "false" ]; then
+            git commit -m "chore: 上游快照结构调整（无内容变更）"
           else
             git commit -m "chore: 同步上游快照"
           fi
@@ -133,7 +154,10 @@ jobs:
           git push || { git pull --rebase && git push; }
 
       - name: Open issue
-        if: steps.drift.outputs.changed == 'true' && steps.baseline.outputs.first_run != 'true'
+        if: >-
+          steps.drift.outputs.changed == 'true'
+          && steps.drift.outputs.content_changed == 'true'
+          && steps.baseline.outputs.first_run != 'true'
         uses: actions/github-script@v7
         with:
           script: |
