@@ -16,11 +16,28 @@ permissions:
   contents: write
   issues: write
 
+env:
+  # GitHub Issue body 上限 65536 字符，留出正文模板的余量
+  DIFF_LIMIT: 50000
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Detect baseline run
+        id: baseline
+        run: |
+          # 首次运行时 upstream/ 下没有任何快照，全部文件都会算作"新增"，
+          # 这时开 Issue 没有意义（diff 就是整个上游代码）。只提交基线即可。
+          if [ -z "$(ls -A upstream/hasscc 2>/dev/null)" ] \
+             && [ -z "$(ls -A upstream/marcelwestra 2>/dev/null)" ]; then
+            echo "first_run=true" >> "$GITHUB_OUTPUT"
+            echo "首次运行，建立基线快照。"
+          else
+            echo "first_run=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Fetch upstream snapshots
         run: |
@@ -57,6 +74,7 @@ jobs:
         id: drift
         run: |
           set -euo pipefail
+
           if [ -z "$(git status --porcelain upstream/)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "上游无变化。"
@@ -65,41 +83,65 @@ jobs:
 
           echo "changed=true" >> "$GITHUB_OUTPUT"
           git add -A upstream/
-          # 截断到 50000 字符，GitHub Issue body 上限 65536
-          git diff --cached -- upstream/ | head -c 50000 > /tmp/upstream.diff
-          {
-            echo "summary<<DIFFEOF"
-            git diff --cached --stat -- upstream/
-            echo "DIFFEOF"
-          } >> "$GITHUB_OUTPUT"
+
+          # 注意：不要写成 `git diff | head -c N`。
+          # head 读满 N 字节就关闭管道退出，git 随即收到 SIGPIPE 以 141 退出，
+          # 在 set -o pipefail 下会让整个 step 失败。
+          # 先完整落盘，再从文件截断，head 读文件不产生 SIGPIPE。
+          git diff --cached -- upstream/ > "$RUNNER_TEMP/full.diff"
+          git diff --cached --stat -- upstream/ > "$RUNNER_TEMP/full.stat"
+
+          head -c "$DIFF_LIMIT" "$RUNNER_TEMP/full.diff" > "$RUNNER_TEMP/upstream.diff"
+          head -n 60 "$RUNNER_TEMP/full.stat" > "$RUNNER_TEMP/upstream.stat"
+
+          full_size=$(wc -c < "$RUNNER_TEMP/full.diff")
+          if [ "$full_size" -gt "$DIFF_LIMIT" ]; then
+            echo "truncated=true" >> "$GITHUB_OUTPUT"
+            echo "diff 共 ${full_size} 字节，已截断到 ${DIFF_LIMIT}。"
+          else
+            echo "truncated=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Commit snapshot
         if: steps.drift.outputs.changed == 'true'
         run: |
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: sync upstream snapshot"
-          git push
+
+          if [ "${{ steps.baseline.outputs.first_run }}" = "true" ]; then
+            git commit -m "chore: 建立上游快照基线"
+          else
+            git commit -m "chore: 同步上游快照"
+          fi
+
+          # 并发或手动推送导致落后时重试一次
+          git push || { git pull --rebase && git push; }
 
       - name: Open issue
-        if: steps.drift.outputs.changed == 'true'
+        if: steps.drift.outputs.changed == 'true' && steps.baseline.outputs.first_run != 'true'
         uses: actions/github-script@v7
-        env:
-          SUMMARY: ${{ steps.drift.outputs.summary }}
         with:
           script: |
             const fs = require('fs');
-            const diff = fs.readFileSync('/tmp/upstream.diff', 'utf8');
+            const tmp = process.env.RUNNER_TEMP;
+            const diff = fs.readFileSync(`${tmp}/upstream.diff`, 'utf8');
+            const stat = fs.readFileSync(`${tmp}/upstream.stat`, 'utf8');
+            const truncated = '${{ steps.drift.outputs.truncated }}' === 'true';
             const today = new Date().toISOString().slice(0, 10);
+
             const body = [
               '上游代码有变动，快照已提交到 `upstream/`。',
               '',
               '## 变更概览',
               '```',
-              process.env.SUMMARY.trim(),
+              stat.trim(),
               '```',
               '',
               '## 完整 diff',
+              truncated
+                ? '> diff 过大已截断，完整内容见 `upstream/` 目录的本次提交。'
+                : '',
               '<details><summary>展开</summary>',
               '',
               '```diff',
@@ -110,13 +152,13 @@ jobs:
               '',
               '## 处理清单',
               '',
-              '- [ ] 判断变更是否影响国内服（区服无关的修复直接吸收，`-fk` 相关的忽略）',
-              '- [ ] 检查是否改了 API 路径、`app_id`、UA 或鉴权方式 —— 这几项两区共用，必须跟',
-              '- [ ] 检查 `SENSOR_TYPES` 是否新增/改名了传感器',
-              '- [ ] 决定吸收的部分，改到 `custom_components/niu/` 下并 bump `manifest.json` 版本',
+              '- [ ] 是否改了 API 路径、`app_id`、UA 或鉴权方式 —— 这几项两区共用，**必须跟**',
+              '- [ ] 是否只涉及 `-fk` 国际服端点 —— 与国内服无关，忽略',
+              '- [ ] `SENSOR_TYPES` 是否新增或改名了传感器',
+              '- [ ] 其余修复按需吸收，改完 bump `manifest.json` 的 `version`',
               '',
-              '> 上游 diff 只是参考，本仓库已重构过架构，不要直接覆盖文件。',
-            ].join('\n');
+              '> 本仓库已重构过架构，不要用上游文件直接覆盖 `custom_components/niu/`，diff 仅作参考。',
+            ].filter(Boolean).join('\n');
 
             await github.rest.issues.create({
               owner: context.repo.owner,
