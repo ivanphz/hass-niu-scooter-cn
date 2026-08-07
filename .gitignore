@@ -1,0 +1,15 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+.idea/
+venv/
+
+integration_demo/
+UPGRADE_SUMMARY.md
+DOCUMENTATION_CN.md
+IMPROVEMENTS_SUMMARY.md
+BUGFIX_SENSOR_ATTRIBUTES.md
+
+.DS_Store
