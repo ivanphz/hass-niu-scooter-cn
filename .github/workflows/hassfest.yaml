@@ -4,7 +4,15 @@ on:
   push:
   pull_request:
   schedule:
+    # 每日跑一次。hassfest 镜像是 :latest，HA 上游改了校验规则能及时发现。
     - cron: "0 0 * * *"
+  workflow_dispatch:
+
+# 仓库为了 upstream-check 全局开了写权限，这里单独收窄到最小集：
+# 只需读代码；pull-requests 是给 hacs/action 在 PR 上留评论用的。
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   validate:
