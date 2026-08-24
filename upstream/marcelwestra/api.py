@@ -1,27 +1,113 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 import hashlib
-import json
-
-# from homeassistant.util import Throttle
-from time import gmtime, strftime
+import logging
+from threading import Lock
+from time import gmtime, monotonic, strftime
+from typing import Any
 
 import requests
 
-from .const import *
+from .const import (
+    ACCOUNT_BASE_URL,
+    API_BASE_URL,
+    LOGIN_URI,
+    MOTOR_BATTERY_API_URI,
+    MOTOR_INDEX_API_URI,
+    MOTOINFO_ALL_API_URI,
+    MOTOINFO_LIST_API_URI,
+    TRACK_LIST_API_URI,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+APP_ID = "niu_ktdrr960"
+REQUEST_TIMEOUT = (10, 30)
+TOKEN_REFRESH_MARGIN = 5 * 60
+TOKEN_REFRESH_FALLBACK = 22 * 60 * 60
+
+
+class NiuApiError(Exception):
+    """Base exception for NIU API failures."""
+
+
+class NiuConnectionError(NiuApiError):
+    """The NIU service could not be reached."""
+
+
+class NiuAuthenticationError(NiuApiError):
+    """NIU rejected the current authentication."""
+
+
+class NiuHttpError(NiuApiError):
+    """NIU returned an unexpected HTTP client error."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"NIU API returned HTTP {status_code}")
+        self.status_code = status_code
+
+
+class NiuServerError(NiuApiError):
+    """NIU returned a server-side error."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"NIU API returned server error HTTP {status_code}")
+        self.status_code = status_code
+
+
+class NiuRateLimitError(NiuApiError):
+    """NIU rate-limited the client."""
+
+    def __init__(self, retry_after: int | None) -> None:
+        message = "NIU API rate limit exceeded"
+        if retry_after is not None:
+            message += f"; retry after {retry_after} seconds"
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class NiuResponseError(NiuApiError):
+    """NIU returned an invalid JSON document or an API-level error."""
+
+    def __init__(self, message: str, niu_status: object | None = None) -> None:
+        super().__init__(message)
+        self.niu_status = niu_status
+
+
+class NiuVehicleNotFoundError(NiuApiError):
+    """The selected vehicle index does not exist in the NIU account."""
+
+    def __init__(self, scooter_id: int) -> None:
+        super().__init__(f"NIU vehicle index {scooter_id} does not exist")
+        self.scooter_id = scooter_id
 
 
 class NiuApi:
-    def __init__(self, username, password, scooter_id, language="en-US", timezone="UTC") -> None:
+    def __init__(
+        self,
+        username,
+        password,
+        scooter_id,
+        language="en-US",
+        timezone="UTC",
+    ) -> None:
         self.username = username
         self.password = password
         self.scooter_id = int(scooter_id)
         self.language = language
         self.timezone = timezone
 
+        self.token = None
+        self.refresh_token = None
+        self._token_refresh_at = None
+        self._auth_generation = 0
+        self._auth_lock = Lock()
+
         self.dataBat = None
         self.dataMoto = None
         self.dataMotoInfo = None
         self.dataTrackInfo = None
+        self.sn = None
+        self.sensor_prefix = ""
 
     @classmethod
     def from_hass(cls, hass, username, password, scooter_id):
@@ -31,133 +117,281 @@ class NiuApi:
         # not if it already includes a region (e.g. "en-GB", "zh-Hans")
         if hass.config.country and "-" not in language:
             language = f"{language}-{hass.config.country}"
-        return cls(username, password, scooter_id, language=language, timezone=str(hass.config.time_zone))
+        return cls(
+            username,
+            password,
+            scooter_id,
+            language=language,
+            timezone=str(hass.config.time_zone),
+        )
 
-    def initApi(self):
-        self.token = self.get_token()
-        api_uri = MOTOINFO_LIST_API_URI
-        self.sn = self.get_vehicles_info(api_uri)["data"]["items"][self.scooter_id][
-            "sn_id"
-        ]
-        self.sensor_prefix = self.get_vehicles_info(api_uri)["data"]["items"][
-            self.scooter_id
-        ]["scooter_name"]
-        self.updateBat()
-        self.updateMoto()
-        self.updateMotoInfo()
-        self.updateTrackInfo()
+    def initialize(self):
+        """Authenticate and load vehicle metadata without polling entity data."""
+        self.get_token()
+        vehicles = self.get_vehicles_info(MOTOINFO_LIST_API_URI)
+        try:
+            items = vehicles["data"]["items"]
+        except (KeyError, TypeError) as err:
+            raise NiuResponseError("NIU vehicle list has an unexpected format") from err
+
+        if not isinstance(items, list):
+            raise NiuResponseError("NIU vehicle list has an unexpected format")
+        if self.scooter_id < 0 or self.scooter_id >= len(items):
+            raise NiuVehicleNotFoundError(self.scooter_id)
+
+        try:
+            vehicle = items[self.scooter_id]
+            sn = vehicle["sn_id"]
+            scooter_name = vehicle["scooter_name"]
+        except (KeyError, TypeError) as err:
+            raise NiuResponseError("NIU vehicle list has an unexpected format") from err
+        if not sn or not scooter_name:
+            raise NiuResponseError("NIU vehicle list has an unexpected format")
+
+        self.sn = str(sn)
+        self.sensor_prefix = str(scooter_name)
 
     def get_token(self):
-        username = self.username
-        password = self.password
+        """Authenticate with username and password and return an access token."""
+        self._password_login()
+        return self.token
 
-        url = ACCOUNT_BASE_URL + LOGIN_URI
-        md5 = hashlib.md5(password.encode("utf-8")).hexdigest()
+    def refresh_access_token(self):
+        """Renew the current access token using NIU's refresh token grant."""
+        if not self.refresh_token:
+            raise NiuAuthenticationError("NIU did not provide a refresh token")
+
         data = {
-            "account": username,
-            "password": md5,
+            "app_id": APP_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token,
+        }
+        self._store_token(self._request_token(data))
+        return self.token
+
+    def _password_login(self):
+        password_hash = hashlib.md5(self.password.encode("utf-8")).hexdigest()
+        data = {
+            "account": self.username,
+            "password": password_hash,
             "grant_type": "password",
             "scope": "base",
-            "app_id": "niu_ktdrr960",
+            "app_id": APP_ID,
         }
+        self._store_token(self._request_token(data))
+
+    def _request_token(self, data: dict[str, str]) -> dict[str, Any]:
         try:
-            r = requests.post(url, data=data)
-        except BaseException as e:
-            print(e)
-            return False
-        data = json.loads(r.content.decode())
-        return data["data"]["token"]["access_token"]
+            response = requests.post(
+                ACCOUNT_BASE_URL + LOGIN_URI,
+                data=data,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.exceptions.RequestException as err:
+            raise NiuConnectionError("Could not reach NIU authentication service") from err
+
+        payload = self._parse_response(response, authentication_request=True)
+        try:
+            token_data = payload["data"]["token"]
+            access_token = token_data["access_token"]
+        except (KeyError, TypeError) as err:
+            raise NiuAuthenticationError(
+                "NIU authentication response did not contain an access token"
+            ) from err
+        if not isinstance(token_data, dict) or not access_token:
+            raise NiuAuthenticationError("NIU returned an invalid access token")
+        return token_data
+
+    def _store_token(self, token_data: dict[str, Any]) -> None:
+        self.token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token")
+        if refresh_token:
+            self.refresh_token = refresh_token
+
+        refresh_delay = TOKEN_REFRESH_FALLBACK
+        expires_in = token_data.get("expires_in")
+        if expires_in is not None:
+            try:
+                refresh_delay = max(0, int(expires_in) - TOKEN_REFRESH_MARGIN)
+            except (TypeError, ValueError):
+                _LOGGER.debug("NIU returned an invalid expires_in value")
+        self._token_refresh_at = monotonic() + refresh_delay
+        self._auth_generation += 1
+
+    def _ensure_access_token(self) -> None:
+        if not self.token:
+            with self._auth_lock:
+                if not self.token:
+                    self._password_login()
+            return
+
+        if self._token_refresh_at is None or monotonic() < self._token_refresh_at:
+            return
+
+        with self._auth_lock:
+            if self._token_refresh_at is None or monotonic() < self._token_refresh_at:
+                return
+            try:
+                if self.refresh_token:
+                    self.refresh_access_token()
+                else:
+                    self._password_login()
+            except NiuAuthenticationError:
+                self._password_login()
+            except NiuApiError as err:
+                # The existing token may still be valid. Let the data request decide;
+                # a 401 response will trigger the full recovery path below.
+                _LOGGER.warning("Could not proactively refresh NIU token: %s", err)
+
+    def _recover_authentication(self, attempted_generation: int) -> None:
+        with self._auth_lock:
+            if self._auth_generation != attempted_generation:
+                return
+
+            if self.refresh_token:
+                try:
+                    self.refresh_access_token()
+                    return
+                except NiuApiError as err:
+                    _LOGGER.warning("NIU token refresh failed; logging in again: %s", err)
+
+            self._password_login()
+
+    def _authenticated_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        self._ensure_access_token()
+        attempted_generation = self._auth_generation
+        response = self._perform_request(method, path, headers=headers, **kwargs)
+
+        if response.status_code == 401:
+            self._recover_authentication(attempted_generation)
+            response = self._perform_request(method, path, headers=headers, **kwargs)
+            if response.status_code == 401:
+                raise NiuAuthenticationError(
+                    "NIU rejected authentication after token recovery"
+                )
+
+        return self._parse_response(response)
+
+    def _perform_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        **kwargs,
+    ):
+        request_headers = {**(headers or {}), "token": self.token}
+        request_method = requests.get if method == "GET" else requests.post
+        try:
+            return request_method(
+                API_BASE_URL + path,
+                headers=request_headers,
+                timeout=REQUEST_TIMEOUT,
+                **kwargs,
+            )
+        except requests.exceptions.RequestException as err:
+            raise NiuConnectionError("Could not communicate with NIU API") from err
+
+    @staticmethod
+    def _parse_retry_after(response) -> int | None:
+        value = response.headers.get("Retry-After")
+        if value is None:
+            return None
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _parse_response(
+        self, response, *, authentication_request: bool = False
+    ) -> dict[str, Any]:
+        status_code = response.status_code
+        if status_code == 429:
+            raise NiuRateLimitError(self._parse_retry_after(response))
+        if status_code >= 500:
+            raise NiuServerError(status_code)
+        if status_code in (401, 403) or (
+            authentication_request and status_code == 400
+        ):
+            raise NiuAuthenticationError(
+                f"NIU rejected authentication with HTTP {status_code}"
+            )
+        if status_code >= 400:
+            raise NiuHttpError(status_code)
+
+        try:
+            payload = response.json()
+        except (ValueError, requests.exceptions.RequestException) as err:
+            raise NiuResponseError("NIU returned invalid JSON") from err
+        if not isinstance(payload, dict):
+            raise NiuResponseError("NIU returned an unexpected JSON document")
+
+        niu_status = payload.get("status", 0)
+        if niu_status != 0:
+            description = payload.get("desc") or "unknown NIU API error"
+            if authentication_request:
+                raise NiuAuthenticationError(
+                    f"NIU authentication failed with status {niu_status}: {description}"
+                )
+            raise NiuResponseError(
+                f"NIU API returned status {niu_status}: {description}",
+                niu_status=niu_status,
+            )
+        return payload
 
     def get_vehicles_info(self, path):
-        token = self.token
-
-        url = API_BASE_URL + path
-        headers = {"token": token}
-        try:
-            r = requests.get(url, headers=headers, data=[])
-        except ConnectionError:
-            return False
-        if r.status_code != 200:
-            return False
-        data = json.loads(r.content.decode())
-        return data
+        return self._authenticated_request("GET", path)
 
     def get_info(
         self,
         path,
     ):
-        sn = self.sn
-        token = self.token
-        url = API_BASE_URL + path
-
-        params = {"sn": sn}
+        params = {"sn": self.sn}
         is_chinese = self.language.startswith("zh")
         client_id = "Domestic" if is_chinese else "Overseas"
         headers = {
-            "token": token,
             "Accept-Language": self.language,
             "user-agent": f"manager/4.10.4 (android; IN2020 11);lang={self.language};clientIdentifier={client_id};timezone={self.timezone};model=IN2020;deviceName=IN2020;ostype=android",
         }
-        try:
-            r = requests.get(url, headers=headers, params=params)
-
-        except ConnectionError:
-            return False
-        if r.status_code != 200:
-            return False
-        data = json.loads(r.content.decode())
-        if data["status"] != 0:
-            return False
-        return data
+        return self._authenticated_request(
+            "GET", path, headers=headers, params=params
+        )
 
     def post_info(
         self,
         path,
     ):
-        sn, token = self.sn, self.token
-        url = API_BASE_URL + path
-        params = {}
-        headers = {"token": token, "Accept-Language": self.language}
-        try:
-            r = requests.post(url, headers=headers, params=params, data={"sn": sn})
-        except ConnectionError:
-            return False
-        if r.status_code != 200:
-            return False
-        data = json.loads(r.content.decode())
-        if data["status"] != 0:
-            return False
-        return data
+        headers = {"Accept-Language": self.language}
+        return self._authenticated_request(
+            "POST", path, headers=headers, data={"sn": self.sn}
+        )
 
     def post_info_track(self, path):
-        sn, token = self.sn, self.token
-        url = API_BASE_URL + path
-        params = {}
         is_chinese = self.language.startswith("zh")
         client_id = "Domestic" if is_chinese else "Overseas"
         headers = {
-            "token": token,
             "Accept-Language": self.language,
             "User-Agent": f"manager/1.0.0 (identifier);clientIdentifier={client_id}",
         }
-        try:
-            r = requests.post(
-                url,
-                headers=headers,
-                params=params,
-                json={"index": "0", "pagesize": 10, "sn": sn},
-            )
-        except ConnectionError:
-            return False
-        if r.status_code != 200:
-            return False
-        data = json.loads(r.content.decode())
-        if data["status"] != 0:
-            return False
-        return data
+        return self._authenticated_request(
+            "POST",
+            path,
+            headers=headers,
+            json={"index": "0", "pagesize": 10, "sn": self.sn},
+        )
 
-    def getDataBatA(self, id_field): 
-        return self.dataBat["data"]["batteries"]["compartmentA"][id_field]
+    def getDataBatA(self, id_field):
+        try:
+            return self.dataBat["data"]["batteries"]["compartmentA"][id_field]
+        except (KeyError, TypeError):
+            return None
 
     def hasSecondBattery(self):
         try:
@@ -172,26 +406,51 @@ class NiuApi:
             return None
 
     def getDataMoto(self, id_field):
-        return self.dataMoto["data"][id_field]
+        try:
+            return self.dataMoto["data"][id_field]
+        except (KeyError, TypeError):
+            return None
 
     def getDataDist(self, id_field):
-        return self.dataMoto["data"]["lastTrack"][id_field]
+        try:
+            return self.dataMoto["data"]["lastTrack"][id_field]
+        except (KeyError, TypeError):
+            return None
 
     def getDataPos(self, id_field):
-        return self.dataMoto["data"]["postion"][id_field]
+        try:
+            return self.dataMoto["data"]["postion"][id_field]
+        except (KeyError, TypeError):
+            return None
 
     def getDataOverall(self, id_field):
-        return self.dataMotoInfo["data"][id_field]
+        try:
+            return self.dataMotoInfo["data"][id_field]
+        except (KeyError, TypeError):
+            return None
 
     def getDataTrack(self, id_field):
-        if id_field == "startTime" or id_field == "endTime":
-            return datetime.fromtimestamp(
-                (self.dataTrackInfo["data"][0][id_field]) / 1000
-            ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            value = self.dataTrackInfo["data"][0][id_field]
+        except (IndexError, KeyError, TypeError):
+            return None
+
+        if id_field in ("startTime", "endTime"):
+            try:
+                return datetime.fromtimestamp(value / 1000).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            except (OSError, TypeError, ValueError):
+                return None
         if id_field == "ridingtime":
-            return strftime("%H:%M:%S", gmtime(self.dataTrackInfo["data"][0][id_field]))
+            try:
+                return strftime("%H:%M:%S", gmtime(value))
+            except (OSError, TypeError, ValueError):
+                return None
         if id_field == "track_thumb":
-            thumburl = self.dataTrackInfo["data"][0][id_field]
+            if not isinstance(value, str):
+                return None
+            thumburl = value
             # Rewrite domestic CDN URLs to overseas; skip if already overseas
             if "app-api.niucache.com" in thumburl:
                 thumburl = thumburl.replace(
@@ -200,89 +459,24 @@ class NiuApi:
             if "/track/thumb/" in thumburl and "/track/overseas/thumb/" not in thumburl:
                 thumburl = thumburl.replace("/track/thumb/", "/track/overseas/thumb/")
             return thumburl
-        return self.dataTrackInfo["data"][0][id_field]
+        return value
 
     def updateBat(self):
-        self.dataBat = self.get_info(MOTOR_BATTERY_API_URI)
+        result = self.get_info(MOTOR_BATTERY_API_URI)
+        if result is not None:
+            self.dataBat = result
 
     def updateMoto(self):
-        self.dataMoto = self.get_info(MOTOR_INDEX_API_URI)
+        result = self.get_info(MOTOR_INDEX_API_URI)
+        if result is not None:
+            self.dataMoto = result
 
     def updateMotoInfo(self):
-        self.dataMotoInfo = self.post_info(MOTOINFO_ALL_API_URI)
+        result = self.post_info(MOTOINFO_ALL_API_URI)
+        if result is not None:
+            self.dataMotoInfo = result
 
     def updateTrackInfo(self):
-        self.dataTrackInfo = self.post_info_track(TRACK_LIST_API_URI)
-
-
-"""class NiuDataBridge(object):
-    async def __init__(self, api):
-    #  hass, username, password, country, scooter_id):
-
-        self.api = api
-        # await hass.async_add_executor_job(lambda : NiuDataBridge(username, password, country, scooter_id))
-        # NiuApi(username, password, country, scooter_id)
-        sn, token = self.api.sn, self.api.token
-
-        self._dataBat = None
-        self._dataMoto = None
-        self._dataMotoInfo = None
-        self._dataTrackInfo = None
-        self._sn = sn
-        self._token = token
-
-    def token(self):
-        return self.api.token
-    
-    def sn(self):
-        return self.api.sn
-
-    def sensor_prefix(self):
-        return self.api.sensor_prefix
-
-    def dataBat(self, id_field):
-        return self._dataBat["data"]["batteries"]["compartmentA"][id_field]
-
-    def dataMoto(self, id_field):
-        return self._dataMoto["data"][id_field]
-
-    def dataDist(self, id_field):
-        return self._dataMoto["data"]["lastTrack"][id_field]
-
-    def dataPos(self, id_field):
-        return self._dataMoto["data"]["postion"][id_field]
-
-    def dataOverall(self, id_field):
-        return self._dataMotoInfo["data"][id_field]
-
-    def dataTrack(self, id_field):
-        if id_field == "startTime" or id_field == "endTime":
-            return datetime.fromtimestamp(
-                (self._dataTrackInfo["data"][0][id_field]) / 1000
-            ).strftime("%Y-%m-%d %H:%M:%S")
-        if id_field == "ridingtime":
-            return strftime(
-                "%H:%M:%S", gmtime(self._dataTrackInfo["data"][0][id_field])
-            )
-        if id_field == "track_thumb":
-            thumburl = self._dataTrackInfo["data"][0][id_field].replace(
-                "app-api.niucache.com", "app-api-fk.niu.com"
-            )
-            return thumburl.replace("/track/thumb/", "/track/overseas/thumb/")
-        return self._dataTrackInfo["data"][0][id_field]
-
-    @Throttle(timedelta(seconds=1))
-    def updateBat(self):
-        self._dataBat = self.api.get_info(MOTOR_BATTERY_API_URI)
-
-    @Throttle(timedelta(seconds=1))
-    def updateMoto(self):
-        self._dataMoto = self.api.get_info(MOTOR_INDEX_API_URI)
-
-    @Throttle(timedelta(seconds=1))
-    def updateMotoInfo(self):
-        self._dataMotoInfo = self.api.post_info(MOTOINFO_ALL_API_URI)
-
-    @Throttle(timedelta(seconds=1))
-    def updateTrackInfo(self):
-        self._dataTrackInfo = self.api.post_info_track(TRACK_LIST_API_URI)"""
+        result = self.post_info_track(TRACK_LIST_API_URI)
+        if result is not None:
+            self.dataTrackInfo = result

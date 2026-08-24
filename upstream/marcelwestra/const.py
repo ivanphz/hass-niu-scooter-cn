@@ -56,62 +56,6 @@ AVAILABLE_SENSORS = [
     "LastTrackRidingtime",
     "LastTrackThumb",
 ]
-
-
-import voluptuous as vol
-
-from homeassistant.components.sensor import PLATFORM_SCHEMA
-
-# Sensors schemas
-from homeassistant.const import CONF_MONITORED_VARIABLES
-import homeassistant.helpers.config_validation as cv
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    {
-        vol.Required(CONF_USERNAME): cv.string,
-        vol.Required(CONF_PASSWORD): cv.string,
-        vol.Optional(CONF_SCOOTER_ID, default=DEFAULT_SCOOTER_ID): cv.positive_int,
-        vol.Optional(CONF_MONITORED_VARIABLES, default=["BatteryCharge"]): vol.All(
-            cv.ensure_list,
-            vol.Length(min=1),
-            [
-                vol.In(
-                    [
-                        "BatteryChargeA",
-                        "BatteryChargeB",
-                        "Isconnected",
-                        "TimesCharged",
-                        "temperatureDesc",
-                        "Temperature",
-                        "BatteryGradeA",
-                        "BatteryGradeB",
-                        "CurrentSpeed",
-                        "ScooterConnected",
-                        "IsCharging",
-                        "IsLocked",
-                        "TimeLeft",
-                        "EstimatedMileage",
-                        "centreCtrlBatt",
-                        "HDOP",
-                        "Longitude",
-                        "Latitude",
-                        "Distance",
-                        "RidingTime",
-                        "totalMileage",
-                        "DaysInUse",
-                        "LastTrackStartTime",
-                        "LastTrackEndTime",
-                        "LastTrackDistance",
-                        "LastTrackAverageSpeed",
-                        "LastTrackRidingtime",
-                        "LastTrackThumb",
-                    ]
-                )
-            ],
-        ),
-    }
-)
-
 SENSOR_TYPES = {
     "BatteryChargeA": [
         "battery_charge_a",
@@ -198,7 +142,7 @@ SENSOR_TYPES = {
         "",
         "isCharging",
         SENSOR_TYPE_MOTO,
-        "power",
+        "none",
         "mdi:battery-charging",
     ],
     "IsLocked": ["is_locked", "", "lockStatus", SENSOR_TYPE_MOTO, "lock", "mdi:lock"],
@@ -310,3 +254,15 @@ SENSOR_TYPES = {
         "mdi:map",
     ],
 }
+
+# Names stored by releases before dual-battery support was introduced. Keep
+# their original entity-id suffixes so existing dashboards and history survive
+# a reload, while reusing the current primary-battery definitions.
+SENSOR_TYPES["BatteryCharge"] = [
+    "battery_charge",
+    *SENSOR_TYPES["BatteryChargeA"][1:],
+]
+SENSOR_TYPES["BatteryGrade"] = [
+    "battery_grade",
+    *SENSOR_TYPES["BatteryGradeA"][1:],
+]
